@@ -2,12 +2,19 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
+import os
 from datetime import datetime
 from auth_utils import verify_password
+from init_db_v2 import init_db
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="GreenLeaf Manager", layout="wide", page_icon="🌱")
 DB_FILE = "inventory_v2.db"
+
+# --- DATABASE INITIALIZATION CHECK ---
+# Ensure the database exists and has data for the user to access
+if not os.path.exists(DB_FILE):
+    init_db()
 
 # --- AUTHENTICATION ---
 # Hardcoded admin credentials for demonstration (hash of "admin123" with salt "somesalt")
