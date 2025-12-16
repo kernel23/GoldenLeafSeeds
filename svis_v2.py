@@ -17,12 +17,22 @@ import qrcode
 import io
 import tempfile
 import os
+import base64
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 import re
+
+def get_img_as_base64(file_path):
+    """Reads an image file and converts it to a base64 string for HTML embedding."""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
 
 def parse_smart_location(df):
     """
@@ -270,18 +280,112 @@ def create_label_pdf(batch_data):
     buffer.seek(0)
     return buffer
 
-# --- AUTHENTICATION ---
-with open('config.yaml') as file:
-    config = yaml.load(file, Loader=SafeLoader)
+# --- AUTHENTICATION & LOGIN LOGIC ---
+try:
+    with open('config.yaml') as file:
+        config = yaml.load(file, Loader=SafeLoader)
+except FileNotFoundError:
+    st.error("⚠️ Error: 'config.yaml' not found.")
+    st.stop()
 
 authenticator = stauth.Authenticate(
     config['credentials'],
     config['cookie']['name'],
     config['cookie']['key'],
     config['cookie']['expiry_days'],
+    config['preauthorized']
 )
 
-name, auth_status, username = authenticator.login("main")
+# Initialize session state
+if 'authentication_status' not in st.session_state:
+    st.session_state['authentication_status'] = None
+
+# --- LOGIC BRANCHING ---
+# 1. IF NOT LOGGED IN: Render the Modern Login Page
+if st.session_state['authentication_status'] is not True:
+    
+    # A. Inject Custom CSS (Simplified now that image is handled via HTML)
+    st.markdown(
+        """
+        <style>
+            /* Hide Sidebar */
+            [data-testid="stSidebar"] { display: none; }
+            
+            /* Center the Main Container vertically */
+            .main .block-container {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding-top: 3rem !important;
+            }
+            
+            /* Style the Login Card */
+            div[data-testid="stVerticalBlock"] > div:has(div[data-testid="stForm"]) {
+                background-color: #ffffff;
+                padding: 3rem;
+                border-radius: 20px;
+                box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+                width: 100%;
+                text-align: center; /* Centers text */
+                border: 1px solid #e0e0e0;
+            }
+
+            div[data-testid="stFormSubmitButton"] {
+                display: flex !important;
+                justify-content: center !important;
+                width: 100% !important;
+            }
+
+            /* Input & Button Styling */
+            input { border-radius: 10px !important; padding: 10px !important; }
+            button[kind="primaryFormSubmit"] {
+                background: linear-gradient(135deg, #2E7D32 0%, #1B5E20 100%) !important;
+                border: none; border-radius: 10px; padding: 12px; width: 100%; color: white !important;
+                font-weight: bold; margin: 0 auto !important;
+            
+            }
+            
+            /* Typography */
+            h1 { color: #1B5E20; font-weight: 800; margin-bottom: 0.5rem; text-align: center; }
+            p { text-align: center; color: #666; }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # B. Create Columns to Center Content horizontally
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    # C. Render Content INSIDE the Center Column
+    with col2:
+        # 1. Logo (Centered via HTML wrapper)
+        img_b64 = get_img_as_base64("logo.png")
+        if img_b64:
+            st.markdown(
+                f"""
+                <div style="text-align: center; margin-bottom: 20px;">
+                    <img src="data:image/png;base64,{img_b64}" width="180">
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        # 2. Title & Subtitle
+        st.markdown("<h1>NTA Seed Management System</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='margin-bottom:2rem;'>Manage and track all seed storage activities</p>", unsafe_allow_html=True)
+
+        # 3. RENDER THE LOGIN FORM
+        name, auth_status, username = authenticator.login("main")
+
+        # 4. Error Messages ONLY
+        if auth_status is False:
+            st.error('❌ Incorrect username or password')
+
+# 2. IF LOGGED IN: Render the Main App
+else:
+    name, auth_status, username = authenticator.login("main")
+
+
 
 # --- MAIN APP LOGIC ---
 if auth_status:
@@ -399,7 +503,7 @@ if auth_status:
             # ==================================================
             # SECTION 2: 📋 MASTER INVENTORY LIST
             # ==================================================
-            with st.expander("📋 Master Inventory List", expanded=True):
+            with st.expander("📋 Master Inventory List", expanded=False):
                 st.dataframe(
                     show_df, 
                     use_container_width=True, 
@@ -418,7 +522,7 @@ if auth_status:
             # ==================================================
             # SECTION 3: 🛠️ BATCH MANAGER
             # ==================================================
-            with st.expander("🛠️ Batch Manager", expanded=True):
+            with st.expander("🛠️ Batch Manager", expanded=False):
                 st.write("Select a lot below to Edit, Print Labels, or Update Records.")
                 
                 lot_list = show_df['lot_code'].unique()
