@@ -93,7 +93,11 @@ def upload_to_drive(file_obj, filename):
     
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="GreenLeaf Cloud", layout="wide", page_icon="☁️")
+st.set_page_config(
+    page_title="NTA Seed Management System", 
+    layout="wide", 
+    page_icon="🌱"
+)
 
 # --- 1. GOOGLE SHEETS DB MANAGER ---
 def get_conn():
@@ -279,15 +283,37 @@ authenticator = stauth.Authenticate(
 
 name, auth_status, username = authenticator.login("main")
 
+# --- MAIN APP LOGIC ---
 if auth_status:
-    # --- APP LOGIC ---
+    # --- SIDEBAR BRANDING ---
     with st.sidebar:
-        st.write(f"Connected: **{name}**")
-        authenticator.logout('Logout', 'sidebar')
-        st.divider()
-        st.title("☁️ GreenLeaf Sync")
-        page = st.radio("Go To:", ["Dashboard", "📱 Warehouse Mode", "Receive Stock", "Analytics", "Environment"])
+        # 1. Logo Handling (Graceful fallback if file missing)
+        try:
+            # Place 'logo.png' in your main project folder
+            st.image("logo.png", use_container_width=True) 
+        except Exception:
+            # Fallback if no logo file found
+            st.warning("⚠️ Add 'logo.png' to folder")
+            st.markdown("# 🌱 NTA")
 
+        # 2. Title & Subtitle
+        st.title("NTA Seed Management System")
+        st.caption("Manage and track all seed storage activities")
+        
+        st.divider()
+        
+        # 3. User Info & Logout
+        st.write(f"👤 Connected: **{name}**")
+        authenticator.logout('Logout', 'sidebar')
+        
+        st.divider()
+        
+        # 4. Navigation
+        page = st.radio(
+            "Navigation", 
+            ["Dashboard", "📱 Warehouse Mode", "Receive Stock", "Analytics", "Environment"],
+            label_visibility="collapsed"
+        )
     # Load Data Once for Page Render
     df_inv = load_data("inventory")
     
