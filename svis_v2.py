@@ -25,6 +25,45 @@ from googleapiclient.http import MediaIoBaseUpload
 
 import re
 
+def apply_mobile_styles():
+    st.markdown("""
+        <style>
+            /* 1. Reduce top padding (Streamlit wastes a lot of space at the top) */
+            .block-container {
+                padding-top: 1rem !important;
+                padding-bottom: 5rem !important; /* Space for scrolling on phone */
+            }
+            
+            /* 2. Make Input Fields Taller (Easier to tap) */
+            input, select, textarea {
+                font-size: 16px !important;
+                padding: 12px !important;
+                border-radius: 8px !important;
+            }
+            
+            /* 3. Make Buttons Big and Touchable */
+            button {
+                height: auto !important;
+                padding-top: 10px !important;
+                padding-bottom: 10px !important;
+            }
+            
+            /* 4. Improve Tab Styling for Touch */
+            button[data-baseweb="tab"] {
+                font-size: 16px !important;
+                padding: 10px 20px !important;
+                flex: 1 1 0px; /* Make tabs expand to fill width */
+            }
+            
+            /* 5. Hide the little "Manage App" button on mobile if it gets in the way */
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+        </style>
+    """, unsafe_allow_html=True)
+
+# CALL THIS FUNCTION RIGHT AFTER st.set_page_config()
+apply_mobile_styles()
+
 def get_img_as_base64(file_path):
     """Reads an image file and converts it to a base64 string for HTML embedding."""
     if not os.path.exists(file_path):
@@ -157,6 +196,72 @@ def create_batch(lot, type_, variety, qty, year, germ, loc):
     # Log History
     log_test_result(lot, datetime.now().strftime('%Y-%m-%d'), germ, "Initial Entry")
     return True, "Batch synced to cloud!"
+
+
+def log_transaction(lot_code, action, qty, reason, notes, user="Unknown"):
+    """
+    Logs seed usage, disposal, or additions to the 'transactions' sheet.
+    action: 'IN' (Add) or 'OUT' (Remove)
+    """
+    try:
+        # 1. Load Data
+        df_inv = load_data("inventory")
+        df_trans = load_data("transactions")
+        
+        # 2. Get Variety Info (for easier reporting later)
+        variety = "Unknown"
+        if not df_inv.empty:
+            match = df_inv[df_inv['lot_code'] == lot_code]
+            if not match.empty:
+                variety = match.iloc[0]['variety']
+
+        # 3. Create Record
+        new_record = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "lot_code": str(lot_code),
+            "variety": variety,
+            "action": action,     # "IN" or "OUT"
+            "quantity_g": float(qty),
+            "reason": reason,
+            "user": user,
+            "notes": notes
+        }
+        
+        # 4. Save
+        updated_trans = pd.concat([df_trans, pd.DataFrame([new_record])], ignore_index=True)
+        save_data(updated_trans, "transactions")
+        return True
+    except Exception as e:
+        print(f"Log Error: {e}")
+        return False
+    
+# --- HELPER FUNCTIONS ---
+
+def update_batch_qty(lot_code, change_amount):
+    """
+    Updates the quantity of a specific batch in the 'inventory' sheet.
+    Positive change_amount = Add. Negative change_amount = Remove.
+    """
+    df = load_data("inventory")
+    
+    # Check if the lot exists
+    if lot_code in df['lot_code'].values:
+        # Find the specific row index
+        idx = df.index[df['lot_code'] == lot_code][0]
+        
+        # Calculate new quantity
+        current = float(df.at[idx, 'quantity_g'])
+        new_qty = current + change_amount
+        
+        # Update values (Ensure qty never goes below 0)
+        df.at[idx, 'quantity_g'] = max(0, new_qty)
+        df.at[idx, 'last_updated'] = datetime.now().strftime("%Y-%m-%d")
+        
+        # Save back to Google Sheets
+        save_data(df, "inventory")
+        return True
+    
+    return False
 
 def update_batch_full(original_lot, new_lot, type_, variety, qty, year, loc):
     df = load_data("inventory")
@@ -406,18 +511,17 @@ if auth_status:
         
         st.divider()
         
-        # 3. User Info & Logout
-        st.write(f"👤 Connected: **{name}**")
-        authenticator.logout('Logout', 'sidebar')
-        
-        st.divider()
-        
         # 4. Navigation
         page = st.radio(
             "Navigation", 
-            ["Dashboard", "📱 Warehouse Mode", "Receive Stock", "Analytics", "Environment"],
+            ["Dashboard", "📱 Warehouse Mode", "Add Seed Stock", "Analytics", "Environment"],
             label_visibility="collapsed"
         )
+        st.divider()
+        # 3. User Info & Logout
+        st.write(f"👤 Connected: **{name}**")
+        authenticator.logout('Logout', 'sidebar')
+        st.divider()
     # Load Data Once for Page Render
     df_inv = load_data("inventory")
     
@@ -428,10 +532,16 @@ if auth_status:
             st.warning("Database is empty. Go to 'Receive Stock' to add items.")
         else:
             # --- TOP METRICS ---
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Batches", len(df_inv))
-            col2.metric("Varieties", df_inv['variety'].nunique())
-            col3.metric("Stock Weight", f"{pd.to_numeric(df_inv['quantity_g'], errors='coerce').sum()/1000:.1f} kg")
+            # Using responsive columns for mobile
+            m1, m2 = st.columns(2)
+            m3, m4 = st.columns(2)
+            
+            with m1: st.metric("Total Batches", len(df_inv))
+            with m2: st.metric("Varieties", df_inv['variety'].nunique())
+            with m3: st.metric("Stock Weight", f"{pd.to_numeric(df_inv['quantity_g'], errors='coerce').sum()/1000:.1f} kg")
+            with m4: 
+                low_stock = len(df_inv[pd.to_numeric(df_inv['quantity_g'], errors='coerce') < 500])
+                st.metric("Low Stock", low_stock, delta_color="inverse")
 
             # --- FILTERS (Global) ---
             st.divider()
@@ -464,36 +574,25 @@ if auth_status:
                 if show_df.empty:
                     st.info("No data to visualize.")
                 else:
-                    # Parse Data using the helper we defined earlier
+                    # Parse Data using the helper
                     map_df = parse_smart_location(show_df.copy())
                     
                     vc1, vc2 = st.columns([1, 4])
-                    view_mode = vc1.radio("View Mode:", ["2D Heatmap", "3D Space View"])
+                    view_mode_map = vc1.radio("Map Mode:", ["2D Heatmap", "3D Space View"])
                     
-                    if view_mode == "2D Heatmap":
+                    if view_mode_map == "2D Heatmap":
                         # Heatmap: Cabinet vs Row
-                        agg = map_df.groupby(['cabinet', 'row']).agg(
-                            count=('lot_code', 'count')
-                        ).reset_index()
-                        
+                        agg = map_df.groupby(['cabinet', 'row']).agg(count=('lot_code', 'count')).reset_index()
                         fig_map = px.density_heatmap(
-                            agg, 
-                            x='cabinet', y='row', z='count',
-                            text_auto=True,
-                            title="Storage Density: Cabinet vs. Row",
-                            color_continuous_scale='Viridis'
+                            agg, x='cabinet', y='row', z='count', text_auto=True,
+                            title="Storage Density: Cabinet vs. Row", color_continuous_scale='Viridis'
                         )
-                        fig_map.update_xaxes(categoryorder='category ascending')
-                        fig_map.update_yaxes(categoryorder='category ascending')
                         st.plotly_chart(fig_map, use_container_width=True)
 
-                    elif view_mode == "3D Space View":
+                    elif view_mode_map == "3D Space View":
                         # 3D Scatter
                         fig_3d = px.scatter_3d(
-                            map_df,
-                            x='cabinet', y='row', z='column',
-                            color='status',
-                            symbol='type',
+                            map_df, x='cabinet', y='row', z='column', color='status', symbol='type',
                             hover_data=['lot_code', 'variety', 'quantity_g'],
                             color_discrete_map={'Good': 'green', 'Low Stock': 'orange', 'Critical': 'red'},
                             title="3D Layout: Cabinet x Row x Column"
@@ -501,23 +600,79 @@ if auth_status:
                         st.plotly_chart(fig_3d, use_container_width=True)
 
             # ==================================================
-            # SECTION 2: 📋 MASTER INVENTORY LIST
+            # SECTION 2: 📋 MASTER INVENTORY (UPDATED WITH CARD VIEW)
             # ==================================================
-            with st.expander("📋 Master Inventory List", expanded=False):
+            st.write("### 📦 Inventory List")
+            
+            # Toggle between List (Desktop) and Cards (Mobile)
+            view_toggle = st.radio("View Format:", ["📄 Table View", "📇 Card View (Mobile)"], horizontal=True, label_visibility="collapsed")
+            
+            if view_toggle == "📄 Table View":
                 st.dataframe(
                     show_df, 
                     use_container_width=True, 
                     hide_index=True,
                     column_config={
-                        "status": st.column_config.TextColumn(
-                            "Health",
-                            help="Status based on Germination & Qty",
-                            validate="^(Good|Low Stock|Critical)$"
-                        ),
-                        "quantity_g": st.column_config.NumberColumn("Weight (g)"),
+                        "status": st.column_config.TextColumn("Health", validate="^(Good|Low Stock|Critical)$"),
+                        "quantity_g": st.column_config.NumberColumn("Weight (g)", format="%.1f g"),
                         "current_germination": st.column_config.ProgressColumn("Germ %", format="%.0f%%", min_value=0, max_value=100)
                     }
                 )
+            
+            else:
+                # --- CARD VIEW LOGIC ---
+                # Pagination Setup
+                items_per_page = 10
+                if 'page_num' not in st.session_state: st.session_state.page_num = 0
+                
+                total_items = len(show_df)
+                start_idx = st.session_state.page_num * items_per_page
+                end_idx = start_idx + items_per_page
+                batch_view = show_df.iloc[start_idx:end_idx]
+
+                st.caption(f"Showing {start_idx+1}-{min(end_idx, total_items)} of {total_items} items")
+
+                # Responsive Grid (2 columns)
+                grid_cols = st.columns(2)
+                
+                for index, row in batch_view.iterrows():
+                    with grid_cols[index % 2]:
+                        with st.container(border=True):
+                            # Header
+                            st.markdown(f"#### 🌱 {row['variety']}")
+                            st.caption(f"Lot: **{row['lot_code']}** | Type: {row['type']}")
+                            
+                            # Metrics
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.markdown("**Weight:**")
+                                st.markdown(f":green[{float(row['quantity_g']):,.1f} g]")
+                            with c2:
+                                germ = float(row['current_germination'])
+                                st.markdown("**Germination:**")
+                                st.markdown(f":{'red' if germ < 80 else 'green'}[{germ}%]")
+                            
+                            st.caption(f"📍 {row['location']}")
+                            
+                            # Quick Status Badge
+                            if row['status'] == 'Critical':
+                                st.error("⚠️ Low Viability")
+                            elif row['status'] == 'Low Stock':
+                                st.warning("📉 Low Stock")
+
+                # Pagination Controls
+                st.divider()
+                c_prev, c_curr, c_next = st.columns([1, 2, 1])
+                with c_prev:
+                    if st.session_state.page_num > 0:
+                        if st.button("⬅️ Prev", use_container_width=True):
+                            st.session_state.page_num -= 1
+                            st.rerun()
+                with c_next:
+                    if end_idx < total_items:
+                        if st.button("Next ➡️", use_container_width=True):
+                            st.session_state.page_num += 1
+                            st.rerun()
 
             # ==================================================
             # SECTION 3: 🛠️ BATCH MANAGER
@@ -589,6 +744,7 @@ if auth_status:
                             delete_batch(selected_lot)
                             st.success("Deleted.")
                             st.rerun()
+
 
     # --- 2. WAREHOUSE MODE (Scanner & Transactions) ---
     elif page == "📱 Warehouse Mode":
@@ -675,34 +831,54 @@ if auth_status:
             # Added "Move Stock" tab
             tab_out, tab_in, tab_move = st.tabs(["📤 Remove (Usage)", "📥 Add (Return)", "📍 Move Location"])
 
-            # === TAB 1: REMOVE ===
+           # === TAB 1: REMOVE STOCK ===
             with tab_out:
                 with st.form("remove_stock_form"):
                     c_qty, c_reason = st.columns(2)
-                    remove_qty = c_qty.number_input("Remove (g)", 0.1, current_qty, 100.0, step=10.0)
-                    reason_out = c_reason.selectbox("Reason", ["Planting", "Test Sample", "Disposal", "Transfer Out"])
+                    remove_qty = c_qty.number_input("Amount to Remove (g)", 0.1, max_value=current_qty, value=100.0, step=10.0)
+                    reason_out = c_reason.selectbox("Reason", ["Planting", "Germination Test", "Disposal", "Transfer Out"])
                     
+                    # --- ADDED THIS BACK ---
+                    notes_out = st.text_input("Notes (Optional)", placeholder="e.g. Given to Farmer John")
+                    # -----------------------
+
                     st.write(f"📉 New Balance: :red[{current_qty - remove_qty:,.1f} g]")
                     
-                    if st.form_submit_button("Confirm Removal", type="primary"):
+                    if st.form_submit_button("Confirm Removal", type="primary", use_container_width=True):
+                        # 1. Update Inventory Qty
                         update_batch_qty(selected_lot, -remove_qty)
-                        st.success("Updated!")
+                        
+                        # 2. Log Transaction (Now 'notes_out' exists!)
+                        current_user = st.session_state.get('name', 'Admin')
+                        # Ensure you have the log_transaction function defined at the top of your script
+                        log_transaction(selected_lot, "OUT", remove_qty, reason_out, notes_out, current_user)
+                        
+                        st.success(f"✅ Removed {remove_qty}g & Logged!")
                         st.rerun()
 
-            # === TAB 2: ADD ===
+            # === TAB 2: ADD STOCK ===
             with tab_in:
                 with st.form("add_stock_form"):
                     c_qty, c_reason = st.columns(2)
-                    add_qty = c_qty.number_input("Add (g)", 0.1, value=500.0, step=50.0)
-                    reason_in = c_reason.selectbox("Reason", ["New Harvest", "Return Stock", "Inventory Fix"])
+                    add_qty = c_qty.number_input("Amount to Add (g)", 0.1, value=500.0, step=50.0)
+                    reason_in = c_reason.selectbox("Reason", ["New Harvest", "Return Stock", "Inventory Adjustment"])
+                    
+                    # --- ADDED THIS BACK ---
+                    notes_in = st.text_input("Notes (Optional)", placeholder="e.g. Harvest from Field B")
+                    # -----------------------
                     
                     st.write(f"📈 New Balance: :green[{current_qty + add_qty:,.1f} g]")
                     
-                    if st.form_submit_button("Confirm Addition"):
+                    if st.form_submit_button("Confirm Addition", use_container_width=True):
+                        # 1. Update Inventory Qty
                         update_batch_qty(selected_lot, add_qty)
-                        st.success("Updated!")
+                        
+                        # 2. Log Transaction
+                        current_user = st.session_state.get('name', 'Admin')
+                        log_transaction(selected_lot, "IN", add_qty, reason_in, notes_in, current_user)
+                        
+                        st.success(f"✅ Added {add_qty}g & Logged!")
                         st.rerun()
-
             # === TAB 3: MOVE LOCATION (New!) ===
             with tab_move:
                 st.caption("Update physical location in storage.")
@@ -723,7 +899,7 @@ if auth_status:
                     formatted_loc = f"{new_rack}, {new_row}, {new_col}"
                     st.info(f"New Location Tag: **{formatted_loc}**")
                     
-                    if st.form_submit_button("Update Location"):
+                    if st.form_submit_button("Update Location", use_container_width=True):
                         # Logic to save ONLY the location
                         idx = df_inv.index[df_inv['lot_code'] == selected_lot][0]
                         df_inv.at[idx, 'location'] = formatted_loc
@@ -733,7 +909,91 @@ if auth_status:
                         st.success(f"moved to {formatted_loc}")
                         st.rerun()
 
-                        
+
+    # --- 3. RECEIVE STOCK (Mobile Friendly) ---
+    elif page == "Add Seed Stock":
+        st.title("📥 Receive New Stock")
+        st.caption("Register new seed batches into the inventory.")
+
+        # Load current data to check for duplicates
+        df_inv = load_data("inventory")
+
+        with st.form("receive_form", clear_on_submit=False):
+            st.subheader("1. Batch Details")
+            
+            # Row 1: Identifiers
+            c1, c2 = st.columns(2)
+            lot_code = c1.text_input("Lot Code (Unique ID)", placeholder="e.g. L-2023-001")
+            variety = c2.text_input("Variety Name", placeholder="e.g. Burley 21")
+            
+            # Row 2: Type & Year
+            c3, c4 = st.columns(2)
+            seed_type = c3.selectbox("Seed Type", ["Breeder Seed", "Foundation Seed", "Registered Seed", "Certified Seed"])
+            year_prod = c4.number_input("Year Produced", min_value=2000, max_value=2030, value=2023)
+
+            st.divider()
+            st.subheader("2. Quantity & Quality")
+            
+            # Row 3: Weight & Germination
+            c5, c6 = st.columns(2)
+            qty_g = c5.number_input("Weight (grams)", min_value=0.0, value=1000.0, step=50.0)
+            germ_rate = c6.number_input("Germination Rate (%)", min_value=0, max_value=100, value=95)
+
+            st.divider()
+            st.subheader("3. Storage Location")
+            
+            # Row 4: Structured Location (Matches your 3 racks x 4 rows x 6 cols layout)
+            l1, l2, l3 = st.columns(3)
+            rack = l1.selectbox("Rack", ["Rack 1", "Rack 2", "Rack 3"])
+            row = l2.selectbox("Row", [f"Row {i}" for i in range(1, 5)])
+            col = l3.selectbox("Column", [f"Col {i}" for i in range(1, 7)])
+            
+            # Combine into standard format string
+            final_location = f"{rack}, {row}, {col}"
+            st.info(f"📍 Storing at: **{final_location}**")
+
+            st.divider()
+            
+            # SUBMIT BUTTON (Full Width for Mobile)
+            submitted = st.form_submit_button("💾 Save to Inventory", type="primary", use_container_width=True)
+
+            if submitted:
+                # Validation 1: Check if Lot Code is empty
+                if not lot_code or not variety:
+                    st.error("❌ Error: Lot Code and Variety are required.")
+                
+                # Validation 2: Check for Duplicates
+                elif not df_inv.empty and lot_code in df_inv['lot_code'].values:
+                    st.error(f"❌ Error: Lot Code '{lot_code}' already exists! Please use a unique ID.")
+                
+                else:
+                    # Create New Record
+                    new_data = {
+                        "lot_code": lot_code,
+                        "variety": variety,
+                        "type": seed_type,
+                        "quantity_g": qty_g,
+                        "current_germination": germ_rate,
+                        "year_produced": year_prod,
+                        "location": final_location,
+                        "last_updated": datetime.now().strftime("%Y-%m-%d")
+                    }
+                    
+                    # Append and Save
+                    updated_df = pd.concat([df_inv, pd.DataFrame([new_data])], ignore_index=True)
+                    save_data(updated_df, "inventory")
+                    
+                    # Log Transaction (Initial Stock In)
+                    # We assume you have the log_transaction function from previous steps
+                    current_user = st.session_state.get('name', 'Admin')
+                    log_transaction(lot_code, "IN", qty_g, "Initial Stocking", "New batch received", current_user)
+                    
+                    st.success(f"✅ Batch {lot_code} saved successfully!")
+                    
+                    # Optional: Auto-generate label preview
+                    st.balloons()
+
+
     # --- 4. ANALYTICS (DECISION SUPPORT + ENVIRONMENT) ---
     elif page == "Analytics":
         st.title("📊 Inventory Intelligence")
@@ -757,16 +1017,24 @@ if auth_status:
             low_stock_count = df_inv[df_inv['quantity_g'] < 500].shape[0]
             critical_germ_count = df_inv[df_inv['current_germination'] < 80].shape[0]
 
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Total Stock", f"{total_weight_kg:.2f} kg")
-            k2.metric("Avg Germination", f"{avg_germ:.1f}%", delta=f"{avg_germ-85:.1f}% vs Target" if avg_germ < 85 else "Healthy")
-            k3.metric("Low Stock Batches", low_stock_count, delta="Reorder Needed" if low_stock_count > 0 else None, delta_color="inverse")
-            k4.metric("Critical Quality", critical_germ_count, delta="< 80% Germ", delta_color="inverse")
+        
             
+            row1_1, row1_2 = st.columns(2)
+            row2_1, row2_2 = st.columns(2)
+            with row1_1:
+                st.metric("Total Stock", f"{total_weight_kg:.2f} kg")
+            with row1_2:
+                st.metric("Avg Germination", "{avg_germ:.1f}%", delta=f"{avg_germ-85:.1f}% vs Target" if avg_germ < 85 else "Healthy")
+            with row2_1:
+                st.metric("Low Stock", low_stock_count, delta="Reorder Needed" if low_stock_count > 0 else None, delta_color="inverse")
+            with row2_2:
+                st.metric("Critical", critical_germ_count, delta="< 80% Germ", delta_color="inverse")
+
+
             st.divider()
 
             # --- 2. ADVANCED VISUALIZATIONS ---
-            t1, t2, t3 = st.tabs(["📦 Stock Composition", "📉 Aging & Environment", "⚠️ Action Items"])
+            t1, t2, t3, t4 = st.tabs(["📦 Stock Composition", "📉 Aging & Environment", "⚠️ Action Items", "📉 Usage & Disposal Reports"])
             
             with t1:
                 st.subheader("Inventory Hierarchy & Health")
@@ -907,7 +1175,34 @@ if auth_status:
                         st.info("Not enough recent data for environmental analysis.")
                 else:
                     st.info("Upload Environment Logs to enable Environmental Decision Support.")
-
+            with t4:
+                # ... (Inside Analytics Page) ...
+                st.subheader("📉 Usage & Disposal Reports")
+                df_trans = load_data("transactions")
+                
+                if df_trans.empty:
+                    st.info("No transactions recorded yet.")
+                else:
+                    # Filter for 'OUT' (Usage/Disposal)
+                    usage = df_trans[df_trans['action'] == "OUT"]
+                    
+                    if not usage.empty:
+                        # 1. Pivot Table: Quantity by Reason
+                        st.subheader("Where are our seeds going?")
+                        fig_reason = px.pie(usage, values='quantity_g', names='reason', title="Seed Utilization by Reason")
+                        st.plotly_chart(fig_reason, use_container_width=True)
+                        
+                        # 2. Bar Chart: Usage by Variety
+                        st.subheader("Most Utilized Varieties")
+                        usage_by_var = usage.groupby('variety')['quantity_g'].sum().reset_index()
+                        fig_bar = px.bar(usage_by_var, x='variety', y='quantity_g', title="Total Weight Removed (g)")
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                        
+                        # 3. Recent Logs
+                        st.write("Recent Activity:")
+                        st.dataframe(usage.tail(5)[['timestamp', 'variety', 'quantity_g', 'reason', 'user']], hide_index=True)
+                    else:
+                        st.info("No usage data found.")
     # --- 5. ENVIRONMENT MONITOR ---
     elif page == "Environment":
         st.title("🌡️ Environmental Control")
