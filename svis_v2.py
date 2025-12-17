@@ -24,6 +24,118 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 import re
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch, mm
+from reportlab.graphics.shapes import Drawing, Group
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics import renderPDF
+
+def create_flexible_label(batch_data, layout_type="Thermal 4x2"):
+    """
+    Generates a PDF label with corrected A4 dimensions to prevent cutting.
+    """
+    filename = f"label_{batch_data['lot_code']}.pdf"
+    
+    # === OPTION 1: THERMAL PRINTER (4x2 inches) ===
+    if layout_type == "Thermal 4x2":
+        # (This part was already working fine, keeping it same)
+        c = canvas.Canvas(filename, pagesize=(4*inch, 2*inch))
+        
+        # QR Code Setup
+        qr_size = 1.4 * inch
+        qr = QrCodeWidget(batch_data['lot_code'])
+        bounds = qr.getBounds()
+        scale = qr_size / (bounds[2] - bounds[0])
+        
+        d = Drawing(qr_size, qr_size)
+        d.add(Group(qr, transform=[scale, 0, 0, scale, 0, 0]))
+        renderPDF.draw(d, c, 0.2*inch, 0.3*inch) 
+        
+        # Text Setup
+        text_x = 1.8 * inch 
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(text_x, 1.6*inch, f"{batch_data['variety']}")
+        c.setFont("Helvetica", 11)
+        c.drawString(text_x, 1.35*inch, f"Lot: {batch_data['lot_code']}")
+        c.drawString(text_x, 1.15*inch, f"Type: {batch_data['type']}")
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(text_x, 0.95*inch, f"Germ: {batch_data['current_germination']}%")
+        c.drawString(text_x, 0.75*inch, f"Qty: {float(batch_data['quantity_g']):,.0f}g")
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawString(text_x, 0.3*inch, f"Loc: {batch_data['location']}")
+        
+        c.save()
+        return filename
+
+    # === OPTION 2: A4 SHEET (Standard Avery 3x8 Layout) ===
+    elif layout_type == "A4 Sheet":
+        c = canvas.Canvas(filename, pagesize=A4)
+        width, height = A4 # A4 is 210mm x 297mm
+        
+        # --- CORRECTED DIMENSIONS FOR A4 ---
+        rows = 8
+        cols = 3
+        
+        # Standard Margins for Avery L7160
+        margin_x = 7.0 * mm  # Left/Right margin
+        margin_y = 13.0 * mm # Top/Bottom margin
+        
+        # Precise sticker size
+        col_width = 63.5 * mm 
+        row_height = 38.1 * mm 
+        
+        for r in range(rows):
+            for col in range(cols):
+                # Calculate Coordinates
+                x = margin_x + (col * col_width)
+                # Calculate Y from top down
+                y = height - margin_y - ((r + 1) * row_height)
+                
+                # --- DRAWING CONTENT ---
+                # 1. QR Code (20mm size fits well in this smaller height)
+                qr_size = 20 * mm
+                qr = QrCodeWidget(batch_data['lot_code'])
+                bounds = qr.getBounds()
+                scale = qr_size / (bounds[2] - bounds[0])
+                
+                d = Drawing(qr_size, qr_size)
+                d.add(Group(qr, transform=[scale, 0, 0, scale, 0, 0]))
+                
+                # Draw QR (offset slightly from left edge of sticker)
+                renderPDF.draw(d, c, x + 2*mm, y + 9*mm)
+                
+                # 2. Text Content (To the right of QR)
+                tx = x + 24 * mm # Start text after QR
+                
+                # Variety Name (Truncate if too long to avoid overrun)
+                var_name = batch_data['variety']
+                if len(var_name) > 15: var_name = var_name[:15] + "..."
+                
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(tx, y + 26*mm, var_name)
+                
+                c.setFont("Helvetica", 8)
+                c.drawString(tx, y + 21*mm, f"Lot: {batch_data['lot_code']}")
+                c.drawString(tx, y + 17*mm, f"Germ: {batch_data['current_germination']}%")
+                c.drawString(tx, y + 13*mm, f"Qty: {float(batch_data['quantity_g']):.0f}g")
+                
+                # Location at bottom
+                c.setFont("Helvetica-Oblique", 7)
+                c.drawString(tx, y + 8*mm, f"{batch_data['location']}")
+                
+                # 3. Cut Guides (Optional: Very light gray box to help you see edges)
+                # Set to transparent or very light gray. 
+                # Good for testing, remove if printing on pre-cut stickers.
+                c.setStrokeColorRGB(0.9, 0.9, 0.9) 
+                c.setLineWidth(0.5)
+                c.rect(x, y, col_width, row_height)
+                
+        c.save()
+        return filename
+    
+    return None
+
 
 def apply_mobile_styles():
     st.markdown("""
@@ -690,26 +802,34 @@ if auth_status:
                     # --- INSPECT TAB ---
                     with t1:
                         c1, c2 = st.columns([1,2])
+                        # --- INSPECT TAB ---
+                    with t1:
+                        c1, c2 = st.columns([1,2])
                         with c1:
                             st.info(f"Germination: {batch['current_germination']}%")
                             st.write(f"Location: {batch['location']}")
-                            st.write(f"Updated: {batch['last_updated']}")
                             
-                            # Print Label
-                            pdf = create_label_pdf(batch)
-                            st.download_button("🖨️ Download Label (PDF)", pdf, file_name=f"{selected_lot}.pdf", mime="application/pdf")
-                            
-                            # Log Test Result
                             st.divider()
-                            st.caption("Update Germination Test")
-                            with st.form("test_form"):
-                                d = st.date_input("Date")
-                                r = st.number_input("Result %", 0, 100)
-                                n = st.text_input("Notes")
-                                if st.form_submit_button("Save Test Result"):
-                                    log_test_result(selected_lot, d, r, n)
-                                    st.success("Saved!")
-                                    st.rerun()
+                            st.write("🖨️ **Label Center**")
+                            
+                            # SELECT PRINTER TYPE
+                            printer_type = st.radio("Paper Type:", ["Thermal Roll (4x2)", "A4 Sticker Sheet"], horizontal=True)
+                            layout_code = "Thermal 4x2" if printer_type == "Thermal Roll (4x2)" else "A4 Sheet"
+                            
+                            # GENERATE
+                            if st.button("Generate Label PDF"):
+                                pdf_file = create_flexible_label(batch, layout_type=layout_code)
+                                
+                                # Read file for download
+                                with open(pdf_file, "rb") as f:
+                                    pdf_bytes = f.read()
+                                    
+                                st.download_button(
+                                    label="⬇️ Download PDF",
+                                    data=pdf_bytes,
+                                    file_name=f"Label_{batch['lot_code']}.pdf",
+                                    mime="application/pdf"
+                                )
                         with c2:
                             # Show History Chart
                             hist = load_data("history")
@@ -994,215 +1114,172 @@ if auth_status:
                     st.balloons()
 
 
-    # --- 4. ANALYTICS (DECISION SUPPORT + ENVIRONMENT) ---
+    # --- 4. ANALYTICS (With Usage Reports) ---
     elif page == "Analytics":
         st.title("📊 Inventory Intelligence")
-        st.caption("Data-driven insights for stock, quality, and environmental impact.")
+        st.caption("Data-driven insights for stock, quality, and usage trends.")
         
-        # Load Data
+        # Load All Data Sources
         df_inv = load_data("inventory")
         df_env_log = load_data("env_logs") 
+        df_trans = load_data("transactions") # NEW: Load transaction history
         
         if df_inv.empty:
-            st.warning("No inventory data found. Please Receive Stock first.")
+            st.warning("No inventory data found.")
         else:
             # --- 0. PRE-PROCESSING ---
             df_inv['quantity_g'] = pd.to_numeric(df_inv['quantity_g'], errors='coerce').fillna(0)
             df_inv['current_germination'] = pd.to_numeric(df_inv['current_germination'], errors='coerce').fillna(0)
             df_inv['year_produced'] = pd.to_numeric(df_inv['year_produced'], errors='coerce').fillna(0)
             
-            # --- 1. KPI BOARD ---
+            # --- 1. KPI BOARD (Mobile Friendly) ---
             total_weight_kg = df_inv['quantity_g'].sum() / 1000.0
             avg_germ = df_inv['current_germination'].mean()
-            low_stock_count = df_inv[df_inv['quantity_g'] < 500].shape[0]
-            critical_germ_count = df_inv[df_inv['current_germination'] < 80].shape[0]
-
-        
             
-            row1_1, row1_2 = st.columns(2)
-            row2_1, row2_2 = st.columns(2)
-            with row1_1:
-                st.metric("Total Stock", f"{total_weight_kg:.2f} kg")
-            with row1_2:
-                st.metric("Avg Germination", "{avg_germ:.1f}%", delta=f"{avg_germ-85:.1f}% vs Target" if avg_germ < 85 else "Healthy")
-            with row2_1:
-                st.metric("Low Stock", low_stock_count, delta="Reorder Needed" if low_stock_count > 0 else None, delta_color="inverse")
-            with row2_2:
-                st.metric("Critical", critical_germ_count, delta="< 80% Germ", delta_color="inverse")
-
-
+            # Mobile Grid Layout (2x2)
+            k1, k2 = st.columns(2)
+            k3, k4 = st.columns(2)
+            
+            with k1: st.metric("Total Stock", f"{total_weight_kg:.2f} kg")
+            with k2: st.metric("Avg Germination", f"{avg_germ:.1f}%")
+            with k3: 
+                low_stock = len(df_inv[df_inv['quantity_g'] < 500])
+                st.metric("Low Stock Batches", low_stock, delta_color="inverse")
+            with k4: 
+                crit = len(df_inv[df_inv['current_germination'] < 80])
+                st.metric("Critical Quality", crit, delta_color="inverse")
+            
             st.divider()
 
-            # --- 2. ADVANCED VISUALIZATIONS ---
-            t1, t2, t3, t4 = st.tabs(["📦 Stock Composition", "📉 Aging & Environment", "⚠️ Action Items", "📉 Usage & Disposal Reports"])
+            # --- 2. ADVANCED TABS ---
+            # Added "Transaction Log" as the 4th tab
+            t1, t2, t3, t4 = st.tabs(["📦 Stock Info", "🌍 Environment", "⚠️ Actions", "📉 Transaction Log"])
             
+            # === TAB 1: STOCK COMPOSITION ===
             with t1:
-                st.subheader("Inventory Hierarchy & Health")
-                st.caption("Inner: Type | Middle: Variety | Outer: Lot. (Red = Low Germination)")
+                st.subheader("Inventory Hierarchy")
                 fig_sun = px.sunburst(
                     df_inv, 
                     path=['type', 'variety', 'lot_code'], 
                     values='quantity_g',
                     color='current_germination',
                     color_continuous_scale='RdYlGn',
-                    range_color=[50, 100]
+                    range_color=[50, 100],
+                    title="Stock Distribution (Color = Quality)"
                 )
                 st.plotly_chart(fig_sun, use_container_width=True)
                 
+            # === TAB 2: ENVIRONMENT ===
             with t2:
-                # --- ENVIRONMENTAL CORRELATION ---
-                st.subheader("🌍 Environment vs. Germination Trends")
-                st.caption("Correlating seed production year with quality and average storage conditions.")
-                
-                # 1. Inventory Stats
+                st.subheader("Storage Conditions vs Quality")
+                # (Existing logic for environment correlation)
                 inv_stats = df_inv.groupby('year_produced')['current_germination'].mean().reset_index()
-                inv_stats.rename(columns={'year_produced': 'Year', 'current_germination': 'Avg Germination %'}, inplace=True)
                 
-                # 2. Environment Stats
                 if not df_env_log.empty:
                     df_env_log['date'] = pd.to_datetime(df_env_log['date'])
                     df_env_log['Year'] = df_env_log['date'].dt.year
                     env_stats = df_env_log.groupby('Year')[['avg_temp', 'avg_humidity']].mean().reset_index()
-                    merged_df = pd.merge(inv_stats, env_stats, on='Year', how='outer').sort_values('Year')
+                    merged_df = pd.merge(inv_stats, env_stats, left_on='year_produced', right_on='Year', how='outer').sort_values('year_produced')
                 else:
                     merged_df = inv_stats
-                    st.info("Note: Upload Environment Logs to see Temperature/Humidity overlays.")
 
-                # 3. Combo Chart
                 if not merged_df.empty:
                     from plotly.subplots import make_subplots
                     import plotly.graph_objects as go
-
                     fig_combo = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig_combo.add_trace(go.Bar(x=merged_df['Year'], y=merged_df['Avg Germination %'], name="Germination %", marker_color='lightgreen'), secondary_y=False)
-                    
+                    fig_combo.add_trace(go.Bar(x=merged_df['year_produced'], y=merged_df['current_germination'], name="Germination %", marker_color='lightgreen'), secondary_y=False)
                     if 'avg_temp' in merged_df.columns:
-                        fig_combo.add_trace(go.Scatter(x=merged_df['Year'], y=merged_df['avg_temp'], name="Avg Temp (°C)", mode='lines+markers', line=dict(color='red', width=3)), secondary_y=True)
-                    if 'avg_humidity' in merged_df.columns:
-                        fig_combo.add_trace(go.Scatter(x=merged_df['Year'], y=merged_df['avg_humidity'], name="Avg Humid (%)", mode='lines+markers', line=dict(color='blue', dash='dot')), secondary_y=True)
-
-                    fig_combo.update_layout(title="Germination Rate & Storage Conditions per Year", legend=dict(orientation="h", y=1.1))
-                    fig_combo.update_yaxes(title_text="Germination %", range=[0, 100], secondary_y=False)
-                    fig_combo.update_yaxes(title_text="Temp / Humid", secondary_y=True)
+                        fig_combo.add_trace(go.Scatter(x=merged_df['year_produced'], y=merged_df['avg_temp'], name="Avg Temp (°C)", mode='lines+markers', line=dict(color='red')), secondary_y=True)
                     st.plotly_chart(fig_combo, use_container_width=True)
-                
-                st.divider()
-                
-                # Standard Scatter
-                st.subheader("Viability vs. Age Details")
-                fig_scat = px.scatter(
-                    df_inv, x='year_produced', y='current_germination', size='quantity_g', 
-                    color='type', hover_data=['variety', 'lot_code'], title="Germination Scatter (Size = Qty)"
-                )
-                fig_scat.add_hrect(y0=0, y1=75, line_width=0, fillcolor="red", opacity=0.1, annotation_text="Critical")
-                st.plotly_chart(fig_scat, use_container_width=True)
-
-            with t3:
-                st.subheader("💡 Decision Support Matrix")
-                
-                col_a, col_b = st.columns(2)
-                
-                # 1. Standard Inventory Checks
-                disposal = df_inv[df_inv['current_germination'] < 75]
-                try:
-                    df_inv['last_updated_dt'] = pd.to_datetime(df_inv['last_updated'], errors='coerce')
-                    six_months_ago = datetime.now() - pd.Timedelta(days=180)
-                    stale_batches = df_inv[df_inv['last_updated_dt'] < six_months_ago]
-                except:
-                    stale_batches = pd.DataFrame()
-
-                with col_a:
-                    st.error(f"🚨 Low Viability ({len(disposal)})")
-                    st.caption("Germination < 75%. Recommendation: Discard.")
-                    if not disposal.empty:
-                        st.dataframe(disposal[['lot_code', 'variety', 'current_germination', 'location']], hide_index=True)
-
-                with col_b:
-                    st.warning(f"📅 Stale Records ({len(stale_batches)})")
-                    st.caption("No updates > 6 Mos. Recommendation: Retest.")
-                    if not stale_batches.empty:
-                        st.dataframe(stale_batches[['lot_code', 'variety', 'last_updated']], hide_index=True)
-
-                # 2. NEW: STORAGE ENVIRONMENT ADVISORY
-                st.divider()
-                st.subheader("🌍 Environmental Risk Advisory")
-                
-                if not df_env_log.empty:
-                    # Logic: Analyze last 30 days of LOGGED data
-                    df_env_log['date'] = pd.to_datetime(df_env_log['date'])
-                    latest_log = df_env_log['date'].max()
-                    
-                    # Filter last 30 days relative to the latest data
-                    recent = df_env_log[df_env_log['date'] >= (latest_log - pd.Timedelta(days=30))]
-                    
-                    if not recent.empty:
-                        # Metrics
-                        r_temp = recent['avg_temp'].mean()
-                        r_hum = recent['avg_humidity'].mean()
-                        r_dev_t = recent['avg_temp'].std()
-                        
-                        # -- RULES ENGINE --
-                        risks_found = False
-                        
-                        # Rule 1: High Temp
-                        if r_temp > 25.0:
-                            st.warning(f"🔥 **High Heat Detected (Avg {r_temp:.1f}°C)**")
-                            st.markdown("Recent temperatures exceed 25°C. **Risk:** Accelerated seed aging. **Action:** Check Air Conditioning.")
-                            risks_found = True
-                            
-                        # Rule 2: High Humidity
-                        if r_hum > 55.0:
-                            st.warning(f"💧 **High Humidity Detected (Avg {r_hum:.1f}%)**")
-                            st.markdown("Recent humidity exceeds 55%. **Risk:** Mold growth. **Action:** Check Dehumidifiers / Silica.")
-                            risks_found = True
-                            
-                        # Rule 3: Instability
-                        if r_dev_t > 2.0: # High standard deviation
-                            st.warning("📉 **Unstable Conditions Detected**")
-                            st.markdown("Temperature is fluctuating significantly. **Risk:** Dormancy breaking. **Action:** Check Door Seals/Insulation.")
-                            risks_found = True
-                        
-                        if risks_found:
-                            st.caption("🔻 **Vulnerable Batches** (Germination 75-85%) likely to degrade first:")
-                            vulnerable = df_inv[(df_inv['current_germination'] >= 75) & (df_inv['current_germination'] <= 85)]
-                            if not vulnerable.empty:
-                                st.dataframe(vulnerable[['lot_code', 'variety', 'current_germination', 'location']], hide_index=True)
-                            else:
-                                st.info("No 'On the Edge' batches found. Your stock is relatively resilient.")
-                        else:
-                            st.success(f"✅ Storage Environment is Stable. (Avg T: {r_temp:.1f}°C, Avg H: {r_hum:.1f}%)")
-                    else:
-                        st.info("Not enough recent data for environmental analysis.")
                 else:
-                    st.info("Upload Environment Logs to enable Environmental Decision Support.")
+                    st.info("Not enough data to correlate environment yet.")
+
+            # === TAB 3: ACTION ITEMS ===
+            with t3:
+                c_disp, c_stale = st.columns(2)
+                disposal = df_inv[df_inv['current_germination'] < 75]
+                with c_disp:
+                    st.error(f"🚨 Low Viability ({len(disposal)})")
+                    if not disposal.empty: st.dataframe(disposal[['lot_code', 'variety', 'current_germination']], hide_index=True)
+                
+                # Simple stale check
+                with c_stale:
+                    st.warning("📅 Check Updates")
+                    st.caption("Review these batches for re-testing.")
+                    st.dataframe(df_inv.sort_values('last_updated').head(5)[['lot_code', 'last_updated']], hide_index=True)
+
+            # === TAB 4: TRANSACTION LOG (NEW!) ===
             with t4:
-                # ... (Inside Analytics Page) ...
-                st.subheader("📉 Usage & Disposal Reports")
-                df_trans = load_data("transactions")
+                st.subheader("📜 Audit Trail & Usage Reports")
                 
                 if df_trans.empty:
-                    st.info("No transactions recorded yet.")
+                    st.info("No transaction history found yet. Start using 'Warehouse Mode' to generate logs.")
                 else:
-                    # Filter for 'OUT' (Usage/Disposal)
-                    usage = df_trans[df_trans['action'] == "OUT"]
+                    # 1. High-Level Metrics
+                    # Filter for 'OUT' (Usage) vs 'IN' (Restock)
+                    df_out = df_trans[df_trans['action'] == "OUT"]
+                    df_in = df_trans[df_trans['action'] == "IN"]
                     
-                    if not usage.empty:
-                        # 1. Pivot Table: Quantity by Reason
-                        st.subheader("Where are our seeds going?")
-                        fig_reason = px.pie(usage, values='quantity_g', names='reason', title="Seed Utilization by Reason")
-                        st.plotly_chart(fig_reason, use_container_width=True)
+                    m_out = df_out['quantity_g'].sum()
+                    m_in = df_in['quantity_g'].sum()
+                    
+                    tm1, tm2 = st.columns(2)
+                    tm1.metric("Total Seeds Distributed/Used", f"{m_out:,.1f} g", delta="- Outflow", delta_color="inverse")
+                    tm2.metric("Total Seeds Restocked", f"{m_in:,.1f} g", delta="+ Inflow")
+                    
+                    st.divider()
+
+                    # 2. Visualizations
+                    # A. Why are we removing seeds? (Reason Analysis)
+                    if not df_out.empty:
+                        st.markdown("##### 📉 Why are seeds leaving storage?")
+                        c_chart1, c_chart2 = st.columns(2)
                         
-                        # 2. Bar Chart: Usage by Variety
-                        st.subheader("Most Utilized Varieties")
-                        usage_by_var = usage.groupby('variety')['quantity_g'].sum().reset_index()
-                        fig_bar = px.bar(usage_by_var, x='variety', y='quantity_g', title="Total Weight Removed (g)")
-                        st.plotly_chart(fig_bar, use_container_width=True)
+                        with c_chart1:
+                            # Pie Chart: Quantity by Reason
+                            fig_reason = px.pie(
+                                df_out, 
+                                values='quantity_g', 
+                                names='reason', 
+                                title="Usage by Reason (Weight)",
+                                hole=0.4,
+                                color_discrete_sequence=px.colors.sequential.RdBu
+                            )
+                            st.plotly_chart(fig_reason, use_container_width=True)
                         
-                        # 3. Recent Logs
-                        st.write("Recent Activity:")
-                        st.dataframe(usage.tail(5)[['timestamp', 'variety', 'quantity_g', 'reason', 'user']], hide_index=True)
-                    else:
-                        st.info("No usage data found.")
+                        with c_chart2:
+                            # Bar Chart: Which Variety is used most?
+                            var_usage = df_out.groupby('variety')['quantity_g'].sum().reset_index().sort_values('quantity_g', ascending=True)
+                            fig_var = px.bar(
+                                var_usage, 
+                                x='quantity_g', 
+                                y='variety', 
+                                orientation='h', 
+                                title="Top Utilized Varieties",
+                                text_auto='.2s'
+                            )
+                            st.plotly_chart(fig_var, use_container_width=True)
+                    
+                    # 3. Recent Log Table
+                    st.divider()
+                    st.markdown("##### 🕵️ Recent Activity Log")
+                    
+                    # Sort by latest first
+                    df_display_trans = df_trans.sort_values('timestamp', ascending=False)
+                    
+                    # Mobile Friendly: Show only key columns
+                    st.dataframe(
+                        df_display_trans[['timestamp', 'action', 'quantity_g', 'variety', 'reason', 'user']],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "timestamp": "Time",
+                            "quantity_g": st.column_config.NumberColumn("Qty (g)", format="%.1f"),
+                            "action": st.column_config.Column("Type", width="small")
+                        }
+                    )
+
+
     # --- 5. ENVIRONMENT MONITOR ---
     elif page == "Environment":
         st.title("🌡️ Environmental Control")
