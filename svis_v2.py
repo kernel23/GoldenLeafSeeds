@@ -590,76 +590,150 @@ if auth_status:
                             st.success("Deleted.")
                             st.rerun()
 
-    # --- 2. WAREHOUSE MODE ---
+    # --- 2. WAREHOUSE MODE (Scanner & Transactions) ---
     elif page == "📱 Warehouse Mode":
-        st.title("📱 Warehouse Ops")
+        st.title("📱 Warehouse Terminal")
+        st.caption("Scan QR, Adjust Stock, or Move Locations.")
+
+        # Load Data
+        df_inv = load_data("inventory")
+
+        if df_inv.empty:
+            st.warning("Inventory is empty.")
+            st.stop()
+
+        # --- A. DUAL INPUT: CAMERA OR DROPDOWN ---
+        # 1. Camera Input (Restored)
+        # We put this in an expander so it doesn't take up space if not needed
+        with st.expander("📷 Open Camera Scanner", expanded=False):
+            img_file = st.camera_input("Take a picture of the QR Code")
         
-        # Scan / Search
-        scan_col, search_col = st.columns([1,2])
-        found_lot = None
-        
-        with scan_col:
-            img = st.camera_input("Scan", label_visibility="collapsed")
-            # Inside the scan block
-            if img:
-                res = decode_qr_image(img)
-                if res:
-                    st.success(f"Scanned: {res}")
-                    found_lot = res
-                else:
-                    st.warning("QR Code not detected. Please try moving closer or creating better lighting.")
-                    
-        with search_col:
-            man = st.text_input("Manual Search", value=found_lot if found_lot else "")
-            if man: found_lot = man
+        # Logic to decode QR if image is taken
+        scanned_code = None
+        if img_file is not None:
+            # Convert the file to an OpenCV image
+            bytes_data = img_file.getvalue()
+            cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
             
-        if found_lot and not df_inv.empty:
-            batch = df_inv[df_inv['lot_code'] == found_lot]
-            if not batch.empty:
-                b = batch.iloc[0]
-                st.header(f"{b['variety']}")
-                st.caption(f"Lot: {b['lot_code']}")
-                
-                m1, m2 = st.columns(2)
-                m1.metric("Weight", f"{b['quantity_g']}g")
-                m2.metric("Loc", f"{b['location']}")
-                
-                with st.expander("⚡ Quick Actions", expanded=True):
-                    c_a, c_b = st.columns(2)
-                    if c_a.button("➖ 50g Used"):
-                        update_stock_quick(found_lot, -50)
-                        st.toast("Updated Cloud!")
-                        st.rerun()
-                    
-                    new_l = c_b.text_input("New Loc", placeholder=b['location'])
-                    if c_b.button("Move"):
-                        update_stock_quick(found_lot, 0, new_location=new_l)
-                        st.toast("Moved!")
-                        st.rerun()
+            # Detect and Decode
+            detector = cv2.QRCodeDetector()
+            data, bbox, _ = detector.detectAndDecode(cv_img)
+            
+            if data:
+                scanned_code = data
+                st.success(f"✅ Scanned: {scanned_code}")
             else:
-                st.error("Lot not found")
+                st.warning("Could not read QR code. Try moving closer.")
 
-    # --- 3. RECEIVE STOCK ---
-    elif page == "Receive Stock":
-        st.title("➕ Receive Stock")
-        with st.form("new_batch"):
-            c1, c2 = st.columns(2)
-            l = c1.text_input("Lot Code")
-            t = c2.selectbox("Type", ["Virginia", "Burley", "Oriental"])
-            v = c1.text_input("Variety")
-            q = c2.number_input("Qty (g)", min_value=0)
-            g = c1.number_input("Germ %", 0, 100, 95)
-            loc = c2.text_input("Location")
-            y = st.number_input("Year", 2020, 2030, 2024)
+        # 2. Manual Search / Select
+        # If we scanned something, we force the selectbox to match it
+        lot_list = df_inv['lot_code'].unique()
+        
+        # Determine index
+        default_ix = 0
+        
+        # Priority 1: Just Scanned Code
+        if scanned_code and scanned_code in lot_list:
+            default_ix = list(lot_list).index(scanned_code)
+            st.session_state['last_selected_lot'] = scanned_code
             
-            if st.form_submit_button("Receive"):
-                if l:
-                    success, msg = create_batch(l, t, v, q, y, g, loc)
-                    if success: st.success(msg)
-                    else: st.error(msg)
-                else:
-                    st.error("Lot Code required")
+        # Priority 2: Previously Selected in Session
+        elif 'last_selected_lot' in st.session_state and st.session_state['last_selected_lot'] in lot_list:
+            default_ix = list(lot_list).index(st.session_state['last_selected_lot'])
 
+        selected_lot = st.selectbox("🔍 Select or Scan Batch:", lot_list, index=default_ix)
+        
+        # Save selection to session state so it persists across button clicks
+        if selected_lot != st.session_state.get('last_selected_lot'):
+            st.session_state['last_selected_lot'] = selected_lot
+            st.rerun()
+
+        # --- B. BATCH OPERATIONS ---
+        if selected_lot:
+            # Get Batch Details
+            batch = df_inv[df_inv['lot_code'] == selected_lot].iloc[0]
+            current_qty = float(batch['quantity_g'])
+            
+            st.divider()
+
+            # Info Card
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                st.subheader(f"🏷️ {batch['variety']}")
+                st.caption(f"Lot: {batch['lot_code']} | Type: {batch['type']}")
+                st.info(f"📍 Current Location: **{batch['location']}**")
+            with c2:
+                st.metric("Stock Level", f"{current_qty:,.1f} g")
+                germ = float(batch['current_germination'])
+                st.metric("Germination", f"{germ}%", delta="Critical" if germ < 80 else "Good", delta_color="inverse" if germ < 80 else "normal")
+
+            st.divider()
+
+            # --- C. TRANSACTION TABS ---
+            st.write("### 📦 Actions")
+            
+            # Added "Move Stock" tab
+            tab_out, tab_in, tab_move = st.tabs(["📤 Remove (Usage)", "📥 Add (Return)", "📍 Move Location"])
+
+            # === TAB 1: REMOVE ===
+            with tab_out:
+                with st.form("remove_stock_form"):
+                    c_qty, c_reason = st.columns(2)
+                    remove_qty = c_qty.number_input("Remove (g)", 0.1, current_qty, 100.0, step=10.0)
+                    reason_out = c_reason.selectbox("Reason", ["Planting", "Test Sample", "Disposal", "Transfer Out"])
+                    
+                    st.write(f"📉 New Balance: :red[{current_qty - remove_qty:,.1f} g]")
+                    
+                    if st.form_submit_button("Confirm Removal", type="primary"):
+                        update_batch_qty(selected_lot, -remove_qty)
+                        st.success("Updated!")
+                        st.rerun()
+
+            # === TAB 2: ADD ===
+            with tab_in:
+                with st.form("add_stock_form"):
+                    c_qty, c_reason = st.columns(2)
+                    add_qty = c_qty.number_input("Add (g)", 0.1, value=500.0, step=50.0)
+                    reason_in = c_reason.selectbox("Reason", ["New Harvest", "Return Stock", "Inventory Fix"])
+                    
+                    st.write(f"📈 New Balance: :green[{current_qty + add_qty:,.1f} g]")
+                    
+                    if st.form_submit_button("Confirm Addition"):
+                        update_batch_qty(selected_lot, add_qty)
+                        st.success("Updated!")
+                        st.rerun()
+
+            # === TAB 3: MOVE LOCATION (New!) ===
+            with tab_move:
+                st.caption("Update physical location in storage.")
+                with st.form("move_stock_form"):
+                    # Structured Inputs based on your Layout (3 Racks, 4 Rows, 6 Cols)
+                    mc1, mc2, mc3 = st.columns(3)
+                    
+                    # Racks 1-3
+                    new_rack = mc1.selectbox("Rack", ["Rack 1", "Rack 2", "Rack 3"])
+                    
+                    # Rows 1-4
+                    new_row = mc2.selectbox("Row", [f"Row {i}" for i in range(1, 5)])
+                    
+                    # Columns 1-6
+                    new_col = mc3.selectbox("Column", [f"Col {i}" for i in range(1, 7)])
+                    
+                    # Preview the formatted string
+                    formatted_loc = f"{new_rack}, {new_row}, {new_col}"
+                    st.info(f"New Location Tag: **{formatted_loc}**")
+                    
+                    if st.form_submit_button("Update Location"):
+                        # Logic to save ONLY the location
+                        idx = df_inv.index[df_inv['lot_code'] == selected_lot][0]
+                        df_inv.at[idx, 'location'] = formatted_loc
+                        df_inv.at[idx, 'last_updated'] = datetime.now().strftime("%Y-%m-%d")
+                        save_data(df_inv, "inventory")
+                        
+                        st.success(f"moved to {formatted_loc}")
+                        st.rerun()
+
+                        
     # --- 4. ANALYTICS (DECISION SUPPORT + ENVIRONMENT) ---
     elif page == "Analytics":
         st.title("📊 Inventory Intelligence")
