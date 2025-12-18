@@ -2,7 +2,7 @@ streamlit
 pandas
 plotly
 PyYAML
-streamlit-authenticator==0.2.3
+streamlit-authenticator==0.3.2
 st-gsheets-connection
 opencv-python-headless
 reportlab

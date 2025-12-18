@@ -1,19 +1,22 @@
-credentials:
-  usernames:
-    tanaval:
-      name: Kenneth Russell Tanaval
-      email: kennethtanaval@gmail.com
-      password: "$2b$12$zrka2OWjAp3rEMyCsiWVw.xfpt0Aucyc6z1sc5n3n8Zt6oa7MfYae"  # <--- Replace this
-    admin:
-      name: Admin User
-      email: admin@greenleaf.com
-      password: "$2b$12$4I42TUy6EIzQOJSIwe2ZzuQjSDQblzrtv7vlnwwLHbrXcFak8R4Xa"  # <--- Replace this
-
 cookie:
   expiry_days: 30
-  key: "godsign" # Change this to any random string
-  name: "greenleaf_cookie"
-
+  key: godsign
+  name: greenleaf_cookie
+credentials:
+  usernames:
+    admin:
+      email: admin@greenleaf.com
+      name: Admin User
+      password: $2b$12$4I42TUy6EIzQOJSIwe2ZzuQjSDQblzrtv7vlnwwLHbrXcFak8R4Xa
+    tanaval:
+      email: kennethtanaval@gmail.com
+      name: Kenneth Russell Tanaval
+      password: $2b$12$zrka2OWjAp3rEMyCsiWVw.xfpt0Aucyc6z1sc5n3n8Zt6oa7MfYae
+    thine:
+      email: ''
+      logged_in: false
+      name: Christine Oclaray
+      password: $2b$12$VodpPT88XWkaQuPVFaNadOIoZtdB4.vpzIgmTKZnwNFFOUtxzkwQ.
 preauthorized:
   emails:
-  - "kennethtanaval@gmail.com"
+  - kennethtanaval@gmail.com

@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 import cv2
 from streamlit_gsheets import GSheetsConnection
+from streamlit_authenticator.utilities.hasher import Hasher
 
 # --- PDF LIBRARIES ---
 from reportlab.lib.pagesizes import landscape
@@ -497,6 +498,11 @@ def create_label_pdf(batch_data):
     buffer.seek(0)
     return buffer
 
+def save_config(config_data):
+    """Saves the updated configuration (users) back to the YAML file."""
+    with open('config.yaml', 'w') as file:
+        yaml.dump(config_data, file, default_flow_style=False)
+
 # --- AUTHENTICATION & LOGIN LOGIC ---
 try:
     with open('config.yaml') as file:
@@ -624,12 +630,23 @@ if auth_status:
         st.divider()
         
         # 4. Navigation
+                # 4. Navigation
+        # Define the base menu
+        menu_options = ["Dashboard", "📱 Warehouse Mode", "Add Seed Stock", "Analytics", "Environment"]
+        
+        # SECURITY CHECK: Only show Admin Panel to specific users
+        # Change 'admin' to your actual username if different
+        admin_users = ["admin", "kenneth", "manager"] 
+        
+        if st.session_state.get('username') in admin_users:
+            menu_options.append("🔐 Admin Panel")
+        
         page = st.radio(
             "Navigation", 
-            ["Dashboard", "📱 Warehouse Mode", "Add Seed Stock", "Analytics", "Environment"],
+            menu_options,
             label_visibility="collapsed"
         )
-        st.divider()
+
         # 3. User Info & Logout
         st.write(f"👤 Connected: **{name}**")
         authenticator.logout('Logout', 'sidebar')
@@ -1278,6 +1295,90 @@ if auth_status:
                             "action": st.column_config.Column("Type", width="small")
                         }
                     )
+
+        # --- 6. ADMIN PANEL (User Management) ---
+    elif page == "🔐 Admin Panel":
+        st.title("🔐 User Management")
+        st.caption("Add or remove system access.")
+        
+        # Load current config to get user list
+        with open('config.yaml') as file:
+            config = yaml.load(file, Loader=SafeLoader)
+            
+        # Get current users dictionary
+        users = config['credentials']['usernames']
+        
+        t1, t2 = st.tabs(["➕ Add New User", "🗑️ Remove User"])
+        
+        # === TAB 1: ADD USER ===
+        with t1:
+            with st.form("add_user_form"):
+                st.subheader("Create New Account")
+                c1, c2 = st.columns(2)
+                new_user = c1.text_input("Username (Login ID)", placeholder="jdoe").lower().strip()
+                new_name = c2.text_input("Full Name", placeholder="John Doe")
+                
+                c3, c4 = st.columns(2)
+                new_pass = c3.text_input("Password", type="password")
+                new_email = c4.text_input("Email (Optional)")
+                
+                if st.form_submit_button("Create User", type="primary"):
+                    if not new_user or not new_name or not new_pass:
+                        st.error("Username, Name, and Password are required.")
+                    elif new_user in users:
+                        st.error("User already exists!")
+                    else:
+                        # 1. Hash the password
+                        hashed_pass = Hasher([new_pass]).generate()[0]
+                        
+                        # 2. Add to dictionary
+                        config['credentials']['usernames'][new_user] = {
+                            "name": new_name,
+                            "password": hashed_pass,
+                            "email": new_email,
+                            "logged_in": False
+                        }
+                        
+                        # 3. Save to YAML
+                        save_config(config)
+                        st.success(f"✅ User '{new_name}' added successfully!")
+                        st.rerun()
+
+        # === TAB 2: REMOVE USER ===
+        with t2:
+            st.subheader("Revoke Access")
+            
+            # List of users to delete (Exclude current user to prevent locking yourself out)
+            current_user = st.session_state['username']
+            del_options = [u for u in users.keys() if u != current_user]
+            
+            if not del_options:
+                st.info("No other users to delete.")
+            else:
+                user_to_del = st.selectbox("Select User to Remove", del_options)
+                
+                st.warning(f"⚠️ You are about to remove access for: **{users[user_to_del]['name']}**")
+                
+                if st.button("Confirm Deletion", type="primary"):
+                    # 1. Remove from dictionary
+                    del config['credentials']['usernames'][user_to_del]
+                    
+                    # 2. Save
+                    save_config(config)
+                    st.success(f"🗑️ User '{user_to_del}' removed.")
+                    st.rerun()
+        
+        # Display Current User Table (Read Only)
+        st.divider()
+        st.subheader("👥 Current Team")
+        
+        # Convert dict to simple list for display
+        team_data = []
+        for u, data in users.items():
+            team_data.append({"Username": u, "Full Name": data['name'], "Email": data.get('email', '-')})
+        
+        st.dataframe(pd.DataFrame(team_data), use_container_width=True, hide_index=True)
+
 
 
     # --- 5. ENVIRONMENT MONITOR ---
