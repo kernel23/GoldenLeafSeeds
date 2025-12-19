@@ -265,6 +265,7 @@ st.set_page_config(
 def get_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
+@st.cache_data(ttl=60)
 def load_data(worksheet):
     """Loads a specific worksheet as a DataFrame."""
     conn = get_conn()
@@ -661,10 +662,8 @@ if auth_status:
             st.warning("Database is empty. Go to 'Receive Stock' to add items.")
         else:
             # --- TOP METRICS ---
-            # Using responsive columns for mobile
             m1, m2 = st.columns(2)
             m3, m4 = st.columns(2)
-            
             with m1: st.metric("Total Batches", len(df_inv))
             with m2: st.metric("Varieties", df_inv['variety'].nunique())
             with m3: st.metric("Stock Weight", f"{pd.to_numeric(df_inv['quantity_g'], errors='coerce').sum()/1000:.1f} kg")
@@ -672,232 +671,193 @@ if auth_status:
                 low_stock = len(df_inv[pd.to_numeric(df_inv['quantity_g'], errors='coerce') < 500])
                 st.metric("Low Stock", low_stock, delta_color="inverse")
 
-            # --- FILTERS (Global) ---
+            # --- GLOBAL SEARCH FILTER ---
             st.divider()
             c1, c2 = st.columns([1, 2])
             filter_var = c1.multiselect("Filter Variety", df_inv['variety'].unique())
             search = c2.text_input("Search Lot Code / Notes")
             
-            # Apply Filters
+            # Apply Global Filters first
             show_df = df_inv.copy()
             if filter_var: show_df = show_df[show_df['variety'].isin(filter_var)]
             if search: show_df = show_df[show_df['lot_code'].astype(str).str.contains(search, case=False)]
             
-            # Status Logic
-            def get_status(row):
-                try:
-                    if float(row['current_germination']) < 80: return 'Critical'
-                    if float(row['quantity_g']) < 500: return 'Low Stock'
-                    return 'Good'
-                except: return 'Unknown'
-            
-            if not show_df.empty:
-                show_df['status'] = show_df.apply(get_status, axis=1)
+            # Helper to parse locations
+            map_df = show_df.copy()
+            try:
+                split_loc = map_df['location'].str.split(',', expand=True)
+                map_df['rack'] = split_loc[0].str.strip()
+                map_df['row'] = split_loc[1].str.strip()
+                map_df['col'] = split_loc[2].str.strip()
+            except:
+                map_df['rack'] = "Unknown"
 
             # ==================================================
-            # SECTION 1: 🗺️ VIRTUAL WAREHOUSE
+            # SECTION 1: 🗺️ INTERACTIVE MAP FILTER
             # ==================================================
-            with st.expander("🗺️ Virtual Warehouse Map", expanded=False):
-                st.caption("Visual representation of stock. Format locations as: **Cabinet, Row, Column**")
+            with st.expander("🗺️ Virtual Warehouse Map", expanded=True):
+                st.caption("Click a blue box to filter the Inventory List & Batch Manager below.")
                 
-                if show_df.empty:
-                    st.info("No data to visualize.")
-                else:
-                    # Parse Data using the helper
-                    map_df = parse_smart_location(show_df.copy())
-                    
-                    vc1, vc2 = st.columns([1, 4])
-                    view_mode_map = vc1.radio("Map Mode:", ["2D Heatmap", "3D Space View"])
-                    
-                    if view_mode_map == "2D Heatmap":
-                        # Heatmap: Cabinet vs Row
-                        agg = map_df.groupby(['cabinet', 'row']).agg(count=('lot_code', 'count')).reset_index()
-                        fig_map = px.density_heatmap(
-                            agg, x='cabinet', y='row', z='count', text_auto=True,
-                            title="Storage Density: Cabinet vs. Row", color_continuous_scale='Viridis'
-                        )
-                        st.plotly_chart(fig_map, use_container_width=True)
+                # Initialize Session State for Filter
+                if 'map_filter' not in st.session_state:
+                    st.session_state.map_filter = None
 
-                    elif view_mode_map == "3D Space View":
-                        # 3D Scatter
-                        fig_3d = px.scatter_3d(
-                            map_df, x='cabinet', y='row', z='column', color='status', symbol='type',
-                            hover_data=['lot_code', 'variety', 'quantity_g'],
-                            color_discrete_map={'Good': 'green', 'Low Stock': 'orange', 'Critical': 'red'},
-                            title="3D Layout: Cabinet x Row x Column"
-                        )
-                        st.plotly_chart(fig_3d, use_container_width=True)
+                r1, r2, r3 = st.tabs(["Rack 1", "Rack 2", "Rack 3"])
+
+                def draw_filter_rack(rack_name):
+                    rack_data = map_df[map_df['rack'] == rack_name]
+                    if rack_data.empty:
+                        st.info(f"{rack_name} is empty.")
+                        return
+
+                    box_stats = rack_data.groupby(['row', 'col']).size().reset_index(name='count')
+                    
+                    fig = px.scatter(
+                        box_stats, x='col', y='row', color='count',
+                        symbol_sequence=['square'], text='count',
+                        title=f"{rack_name} Overview", color_continuous_scale='Blues',
+                        category_orders={
+                            "row": ["Row 4", "Row 3", "Row 2", "Row 1"], 
+                            "col": ["Col 1", "Col 2", "Col 3", "Col 4", "Col 5", "Col 6"]
+                        }
+                    )
+                    fig.update_traces(marker=dict(size=75, line=dict(width=2, color='DarkSlateGrey'), opacity=0.9), textfont=dict(color='white', size=18, weight='bold'))
+                    fig.update_layout(
+                        xaxis_title=None, yaxis_title=None, height=450,
+                        xaxis=dict(side="bottom", showgrid=False, zeroline=False),
+                        yaxis=dict(showgrid=False, zeroline=False),
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+
+                    # CAPTURE CLICK
+                    event = st.plotly_chart(fig, on_select="rerun", use_container_width=True, key=f"chart_{rack_name}")
+                    
+                    if len(event.selection['points']) > 0:
+                        p = event.selection['points'][0]
+                        st.session_state.map_filter = {"rack": rack_name, "row": p['y'], "col": p['x']}
+
+                with r1: draw_filter_rack("Rack 1")
+                with r2: draw_filter_rack("Rack 2")
+                with r3: draw_filter_rack("Rack 3")
+
+                # Clear Filter Button
+                if st.session_state.map_filter:
+                    f = st.session_state.map_filter
+                    st.info(f"📍 Currently Filtering: **{f['rack']} / {f['row']} / {f['col']}**")
+                    if st.button("❌ Show All Locations"):
+                        st.session_state.map_filter = None
+                        st.rerun()
+
+            # --- APPLY MAP FILTER TO DATA ---
+            final_display_df = show_df
+            if st.session_state.map_filter:
+                f = st.session_state.map_filter
+                mask = (map_df['rack'] == f['rack']) & (map_df['row'] == f['row']) & (map_df['col'] == f['col'])
+                # Filter the main dataframe using the index of the map matches
+                final_display_df = show_df.loc[map_df[mask].index]
 
             # ==================================================
-            # SECTION 2: 📋 MASTER INVENTORY (UPDATED WITH CARD VIEW)
+            # SECTION 2: 📋 INVENTORY LIST (Filtered)
             # ==================================================
-            st.write("### 📦 Inventory List")
+            st.write(f"### 📦 Inventory List ({len(final_display_df)} items)")
             
-            # Toggle between List (Desktop) and Cards (Mobile)
-            view_toggle = st.radio("View Format:", ["📄 Table View", "📇 Card View (Mobile)"], horizontal=True, label_visibility="collapsed")
+            view_toggle = st.radio("View:", ["📄 Table View", "📇 Card View"], horizontal=True, label_visibility="collapsed")
             
             if view_toggle == "📄 Table View":
                 st.dataframe(
-                    show_df, 
-                    use_container_width=True, 
-                    hide_index=True,
+                    final_display_df, use_container_width=True, hide_index=True,
                     column_config={
-                        "status": st.column_config.TextColumn("Health", validate="^(Good|Low Stock|Critical)$"),
                         "quantity_g": st.column_config.NumberColumn("Weight (g)", format="%.1f g"),
-                        "current_germination": st.column_config.ProgressColumn("Germ %", format="%.0f%%", min_value=0, max_value=100)
+                        "current_germination": st.column_config.ProgressColumn("Germ %", format="%d%%")
                     }
                 )
-            
             else:
-                # --- CARD VIEW LOGIC ---
-                # Pagination Setup
-                items_per_page = 10
-                if 'page_num' not in st.session_state: st.session_state.page_num = 0
-                
-                total_items = len(show_df)
-                start_idx = st.session_state.page_num * items_per_page
-                end_idx = start_idx + items_per_page
-                batch_view = show_df.iloc[start_idx:end_idx]
-
-                st.caption(f"Showing {start_idx+1}-{min(end_idx, total_items)} of {total_items} items")
-
-                # Responsive Grid (2 columns)
-                grid_cols = st.columns(2)
-                
-                for index, row in batch_view.iterrows():
-                    with grid_cols[index % 2]:
-                        with st.container(border=True):
-                            # Header
-                            st.markdown(f"#### 🌱 {row['variety']}")
-                            st.caption(f"Lot: **{row['lot_code']}** | Type: {row['type']}")
-                            
-                            # Metrics
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                st.markdown("**Weight:**")
-                                st.markdown(f":green[{float(row['quantity_g']):,.1f} g]")
-                            with c2:
-                                germ = float(row['current_germination'])
-                                st.markdown("**Germination:**")
-                                st.markdown(f":{'red' if germ < 80 else 'green'}[{germ}%]")
-                            
-                            st.caption(f"📍 {row['location']}")
-                            
-                            # Quick Status Badge
-                            if row['status'] == 'Critical':
-                                st.error("⚠️ Low Viability")
-                            elif row['status'] == 'Low Stock':
-                                st.warning("📉 Low Stock")
-
-                # Pagination Controls
-                st.divider()
-                c_prev, c_curr, c_next = st.columns([1, 2, 1])
-                with c_prev:
-                    if st.session_state.page_num > 0:
-                        if st.button("⬅️ Prev", use_container_width=True):
-                            st.session_state.page_num -= 1
-                            st.rerun()
-                with c_next:
-                    if end_idx < total_items:
-                        if st.button("Next ➡️", use_container_width=True):
-                            st.session_state.page_num += 1
-                            st.rerun()
+                # Card View Logic (Using final_display_df)
+                if not final_display_df.empty:
+                    cols = st.columns(2)
+                    for index, row in final_display_df.iterrows():
+                        with cols[index % 2]:
+                            with st.container(border=True):
+                                st.markdown(f"**{row['variety']}**")
+                                st.caption(f"{row['lot_code']} | {row['type']}")
+                                st.caption(f"📍 {row['location']}")
+                                c1, c2 = st.columns(2)
+                                c1.write(f"⚖️ {float(row['quantity_g']):.0f}g")
+                                c2.write(f"🧬 {row['current_germination']}%")
+                else:
+                    st.info("No items match filters.")
 
             # ==================================================
-            # SECTION 3: 🛠️ BATCH MANAGER
+            # SECTION 3: 🛠️ BATCH MANAGER (Connected to Filter)
             # ==================================================
-            with st.expander("🛠️ Batch Manager", expanded=False):
-                st.write("Select a lot below to Edit, Print Labels, or Update Records.")
+            st.divider()
+            with st.container(border=True):
+                st.subheader("🛠️ Batch Manager")
                 
-                lot_list = show_df['lot_code'].unique()
-                selected_lot = st.selectbox("Select Lot to Manage:", lot_list)
+                # CRITICAL UPDATE: Source the dropdown from 'final_display_df'
+                # This ensures only the filtered items appear in the dropdown
+                lot_list = final_display_df['lot_code'].unique()
                 
-                if selected_lot:
-                    batch = show_df[show_df['lot_code'] == selected_lot].iloc[0]
-                    t1, t2, t3 = st.tabs(["🔎 Inspect & Print", "✏️ Edit Details", "🗑️ Delete"])
+                if len(lot_list) == 0:
+                    st.warning("No batches available to manage (check filters above).")
+                else:
+                    selected_lot = st.selectbox("Select Lot to Manage:", lot_list)
                     
-                    # --- INSPECT TAB ---
-                    with t1:
-                        c1, c2 = st.columns([1,2])
+                    if selected_lot:
+                        batch = df_inv[df_inv['lot_code'] == selected_lot].iloc[0]
+                        t1, t2, t3 = st.tabs(["🔎 Inspect & Print", "✏️ Edit Details", "🗑️ Delete"])
+                        
                         # --- INSPECT TAB ---
-                    with t1:
-                        c1, c2 = st.columns([1,2])
-                        with c1:
-                            st.info(f"Germination: {batch['current_germination']}%")
-                            st.write(f"Location: {batch['location']}")
-                            
-                            st.divider()
-                            st.write("🖨️ **Label Center**")
-                            
-                            # SELECT PRINTER TYPE
-                            printer_type = st.radio("Paper Type:", ["Thermal Roll (4x2)", "A4 Sticker Sheet"], horizontal=True)
-                            layout_code = "Thermal 4x2" if printer_type == "Thermal Roll (4x2)" else "A4 Sheet"
-                            
-                            # GENERATE
-                            if st.button("Generate Label PDF"):
-                                pdf_file = create_flexible_label(batch, layout_type=layout_code)
+                        with t1:
+                            c1, c2 = st.columns([1,2])
+                            with c1:
+                                st.info(f"Germination: {batch['current_germination']}%")
+                                st.write(f"Location: {batch['location']}")
                                 
-                                # Read file for download
-                                with open(pdf_file, "rb") as f:
-                                    pdf_bytes = f.read()
-                                    
-                                st.download_button(
-                                    label="⬇️ Download PDF",
-                                    data=pdf_bytes,
-                                    file_name=f"Label_{batch['lot_code']}.pdf",
-                                    mime="application/pdf"
-                                )
-                        with c2:
-                            # Show History Chart
-                            hist = load_data("history")
-                            if not hist.empty:
-                                hist = hist[hist['lot_code'] == selected_lot]
+                                st.write("🖨️ **Label Center**")
+                                printer_type = st.radio("Paper Type:", ["Thermal Roll (4x2)", "A4 Sticker Sheet"], horizontal=True)
+                                layout_code = "Thermal 4x2" if printer_type == "Thermal Roll (4x2)" else "A4 Sheet"
+                                if st.button("Generate Label PDF"):
+                                    pdf_file = create_flexible_label(batch, layout_type=layout_code)
+                                    with open(pdf_file, "rb") as f:
+                                        st.download_button("⬇️ Download PDF", f, file_name=f"Label_{batch['lot_code']}.pdf")
+                            with c2:
+                                hist = load_data("history")
                                 if not hist.empty:
-                                    fig = px.line(hist, x='test_date', y='rate', markers=True, title="Germination History")
-                                    fig.update_yaxes(range=[0, 100])
-                                    st.plotly_chart(fig, use_container_width=True)
-                                else:
-                                    st.info("No test history found for this lot.")
+                                    hist = hist[hist['lot_code'] == selected_lot]
+                                    if not hist.empty:
+                                        fig = px.line(hist, x='test_date', y='rate', markers=True, title="Germination History")
+                                        fig.update_yaxes(range=[0, 100])
+                                        st.plotly_chart(fig, use_container_width=True)
 
-                    # --- EDIT TAB ---
-                    with t2:
-                        with st.form("edit_form"):
-                            c1, c2 = st.columns(2)
-                            nl = c1.text_input("Lot Code", value=batch['lot_code'])
-                            nv = c2.text_input("Variety", value=batch['variety'])
-                            
-                            c3, c4 = st.columns(2)
-                            nq = c3.number_input("Qty (g)", value=float(batch['quantity_g']))
-                            
-                            # --- UPDATED DROPDOWN HERE ---
-                            # Logic: Try to find current type in list, default to index 0 if not found
-                            type_options = ["Virginia", "Burley", "Native"]
-                            curr_type_idx = 0
-                            if batch['type'] in type_options:
-                                curr_type_idx = type_options.index(batch['type'])
+                        # --- EDIT TAB ---
+                        with t2:
+                            with st.form("edit_form"):
+                                c1, c2 = st.columns(2)
+                                nl = c1.text_input("Lot Code", value=batch['lot_code'])
+                                nv = c2.text_input("Variety", value=batch['variety'])
+                                c3, c4 = st.columns(2)
+                                nq = c3.number_input("Qty (g)", value=float(batch['quantity_g']))
                                 
-                            nt = c4.selectbox("Tobacco Type", type_options, index=curr_type_idx)
-                            # -----------------------------
+                                type_options = ["Virginia", "Burley", "Native"]
+                                curr_idx = type_options.index(batch['type']) if batch['type'] in type_options else 0
+                                nt = c4.selectbox("Tobacco Type", type_options, index=curr_idx)
+                                
+                                nloc = st.text_input("Location", value=batch['location'])
+                                
+                                if st.form_submit_button("Update Batch"):
+                                    update_batch_full(selected_lot, nl, nt, nv, nq, batch['year_produced'], nloc)
+                                    st.success("Updated Successfully!")
+                                    st.rerun()
 
-                            nloc = st.text_input("Location", value=batch['location'], help="Format: Rack X, Row Y, Col Z")
-                            
-                            if st.form_submit_button("Update Batch"):
-                                # We need a helper function to save these edits
-                                update_batch_full(selected_lot, nl, nt, nv, nq, batch['year_produced'], nloc)
-                                st.success("Updated Successfully!")
+                        # --- DELETE TAB ---
+                        with t3:
+                            st.error("Danger Zone")
+                            if st.button("DELETE BATCH PERMANENTLY", type="primary"):
+                                delete_batch(selected_lot)
+                                st.success("Deleted.")
                                 st.rerun()
-
-                    # --- DELETE TAB ---
-                    with t3:
-                        st.error("Danger Zone")
-                        st.write("This action cannot be undone.")
-                        if st.button("DELETE BATCH PERMANENTLY", type="primary"):
-                            delete_batch(selected_lot)
-                            st.success("Deleted.")
-                            st.rerun()
-
-
-    # --- 2. WAREHOUSE MODE (Scanner & Transactions) ---
+    # --- 2. WAREHOUSE MODE (Two-Step Filtering) ---
     elif page == "📱 Warehouse Mode":
         st.title("📱 Warehouse Terminal")
         st.caption("Scan QR, Adjust Stock, or Move Locations.")
@@ -909,55 +869,93 @@ if auth_status:
             st.warning("Inventory is empty.")
             st.stop()
 
-        # --- A. DUAL INPUT: CAMERA OR DROPDOWN ---
-        # 1. Camera Input (Restored)
-        # We put this in an expander so it doesn't take up space if not needed
+        # --- A. SCANNER SECTION (Override) ---
+        # 1. Camera Input (Keep hidden unless needed)
         with st.expander("📷 Open Camera Scanner", expanded=False):
             img_file = st.camera_input("Take a picture of the QR Code")
         
-        # Logic to decode QR if image is taken
         scanned_code = None
         if img_file is not None:
-            # Convert the file to an OpenCV image
             bytes_data = img_file.getvalue()
             cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-            
-            # Detect and Decode
             detector = cv2.QRCodeDetector()
             data, bbox, _ = detector.detectAndDecode(cv_img)
-            
             if data:
                 scanned_code = data
                 st.success(f"✅ Scanned: {scanned_code}")
-            else:
-                st.warning("Could not read QR code. Try moving closer.")
 
-        # 2. Manual Search / Select
-        # If we scanned something, we force the selectbox to match it
-        lot_list = df_inv['lot_code'].unique()
+        # --- B. SMART FILTERING SECTION ---
+        st.write("### 🔍 Find Batch")
         
-        # Determine index
+        # We use a container to group the filters visually
+        with st.container(border=True):
+            f1, f2 = st.columns(2)
+            
+            # 1. VARIETY FILTER
+            # Get unique varieties and add "All" option
+            all_varieties = ["All"] + sorted(df_inv['variety'].astype(str).unique().tolist())
+            
+            # Check session state to keep selection stable
+            sel_variety = f1.selectbox("1. Filter Variety", all_varieties)
+            
+            # Apply First Filter
+            if sel_variety != "All":
+                df_filtered = df_inv[df_inv['variety'] == sel_variety]
+            else:
+                df_filtered = df_inv
+
+            # 2. YEAR FILTER
+            # Only show years that exist for the selected variety
+            if not df_filtered.empty:
+                available_years = sorted(df_filtered['year_produced'].astype(str).unique().tolist(), reverse=True)
+                all_years = ["All"] + available_years
+                sel_year = f2.selectbox("2. Filter Year", all_years)
+                
+                # Apply Second Filter
+                if sel_year != "All":
+                    df_filtered = df_filtered[df_filtered['year_produced'].astype(str) == sel_year]
+            else:
+                st.warning("No batches found for this variety.")
+                sel_year = "All"
+
+        # --- C. LOT SELECTION ---
+        # Get the final list of lots based on filters
+        lot_list = df_filtered['lot_code'].unique()
+
+        # Determine default index
         default_ix = 0
         
-        # Priority 1: Just Scanned Code
-        if scanned_code and scanned_code in lot_list:
-            default_ix = list(lot_list).index(scanned_code)
-            st.session_state['last_selected_lot'] = scanned_code
-            
-        # Priority 2: Previously Selected in Session
+        # Priority 1: Scanned Code (Overrides filters)
+        if scanned_code:
+            # If scanned code exists in the full DB, switch to it even if filters are set differently
+            if scanned_code in df_inv['lot_code'].values:
+                # We must reset filters implicitly by forcing the selection logic
+                lot_list = [scanned_code] # Force the dropdown to show only this one
+                st.info(f"📍 Scanned Item Found: {scanned_code}")
+        
+        # Priority 2: Previously Selected
         elif 'last_selected_lot' in st.session_state and st.session_state['last_selected_lot'] in lot_list:
             default_ix = list(lot_list).index(st.session_state['last_selected_lot'])
 
-        selected_lot = st.selectbox("🔍 Select or Scan Batch:", lot_list, index=default_ix)
-        
-        # Save selection to session state so it persists across button clicks
-        if selected_lot != st.session_state.get('last_selected_lot'):
-            st.session_state['last_selected_lot'] = selected_lot
-            st.rerun()
+        if len(lot_list) == 0:
+            st.warning("🚫 No batches match your filters.")
+            selected_lot = None
+        else:
+            # Show the filtered list
+            selected_lot = st.selectbox(
+                f"3. Select Batch Lot ({len(lot_list)} found)", 
+                lot_list, 
+                index=default_ix
+            )
 
-        # --- B. BATCH OPERATIONS ---
+            # Persist selection
+            if selected_lot != st.session_state.get('last_selected_lot'):
+                st.session_state['last_selected_lot'] = selected_lot
+                st.rerun()
+
+        # --- D. BATCH OPERATIONS ---
         if selected_lot:
-            # Get Batch Details
+            # Fetch the specific row from the MAIN dataframe (not the filtered one, just to be safe)
             batch = df_inv[df_inv['lot_code'] == selected_lot].iloc[0]
             current_qty = float(batch['quantity_g'])
             
@@ -967,8 +965,8 @@ if auth_status:
             c1, c2 = st.columns([2, 1])
             with c1:
                 st.subheader(f"🏷️ {batch['variety']}")
-                st.caption(f"Lot: {batch['lot_code']} | Type: {batch['type']}")
-                st.info(f"📍 Current Location: **{batch['location']}**")
+                st.caption(f"Lot: **{batch['lot_code']}** | Year: **{batch['year_produced']}**")
+                st.info(f"📍 Location: **{batch['location']}**")
             with c2:
                 st.metric("Stock Level", f"{current_qty:,.1f} g")
                 germ = float(batch['current_germination'])
@@ -976,88 +974,62 @@ if auth_status:
 
             st.divider()
 
-            # --- C. TRANSACTION TABS ---
+            # --- E. TRANSACTION TABS ---
             st.write("### 📦 Actions")
-            
-            # Added "Move Stock" tab
             tab_out, tab_in, tab_move = st.tabs(["📤 Remove (Usage)", "📥 Add (Return)", "📍 Move Location"])
 
-           # === TAB 1: REMOVE STOCK ===
+            # === TAB 1: REMOVE ===
             with tab_out:
                 with st.form("remove_stock_form"):
                     c_qty, c_reason = st.columns(2)
-                    remove_qty = c_qty.number_input("Amount to Remove (g)", 0.1, max_value=current_qty, value=100.0, step=10.0)
-                    reason_out = c_reason.selectbox("Reason", ["Planting", "Germination Test", "Disposal", "Transfer Out"])
+                    remove_qty = c_qty.number_input("Remove (g)", 0.1, current_qty, 100.0, step=10.0)
+                    reason_out = c_reason.selectbox("Reason", ["Planting", "Test Sample", "Disposal", "Transfer Out"])
+                    notes_out = st.text_input("Notes (Optional)", placeholder="e.g. Distributed to Farmer John")
                     
-                    # --- ADDED THIS BACK ---
-                    notes_out = st.text_input("Notes (Optional)", placeholder="e.g. Given to Farmer John")
-                    # -----------------------
-
                     st.write(f"📉 New Balance: :red[{current_qty - remove_qty:,.1f} g]")
                     
                     if st.form_submit_button("Confirm Removal", type="primary", use_container_width=True):
-                        # 1. Update Inventory Qty
                         update_batch_qty(selected_lot, -remove_qty)
-                        
-                        # 2. Log Transaction (Now 'notes_out' exists!)
                         current_user = st.session_state.get('name', 'Admin')
-                        # Ensure you have the log_transaction function defined at the top of your script
                         log_transaction(selected_lot, "OUT", remove_qty, reason_out, notes_out, current_user)
-                        
-                        st.success(f"✅ Removed {remove_qty}g & Logged!")
+                        st.success("Updated!")
                         st.rerun()
 
-            # === TAB 2: ADD STOCK ===
+            # === TAB 2: ADD ===
             with tab_in:
                 with st.form("add_stock_form"):
                     c_qty, c_reason = st.columns(2)
-                    add_qty = c_qty.number_input("Amount to Add (g)", 0.1, value=500.0, step=50.0)
-                    reason_in = c_reason.selectbox("Reason", ["New Harvest", "Return Stock", "Inventory Adjustment"])
-                    
-                    # --- ADDED THIS BACK ---
+                    add_qty = c_qty.number_input("Add (g)", 0.1, value=500.0, step=50.0)
+                    reason_in = c_reason.selectbox("Reason", ["New Harvest", "Return Stock", "Inventory Fix"])
                     notes_in = st.text_input("Notes (Optional)", placeholder="e.g. Harvest from Field B")
-                    # -----------------------
                     
                     st.write(f"📈 New Balance: :green[{current_qty + add_qty:,.1f} g]")
                     
                     if st.form_submit_button("Confirm Addition", use_container_width=True):
-                        # 1. Update Inventory Qty
                         update_batch_qty(selected_lot, add_qty)
-                        
-                        # 2. Log Transaction
                         current_user = st.session_state.get('name', 'Admin')
                         log_transaction(selected_lot, "IN", add_qty, reason_in, notes_in, current_user)
-                        
-                        st.success(f"✅ Added {add_qty}g & Logged!")
+                        st.success("Updated!")
                         st.rerun()
-            # === TAB 3: MOVE LOCATION (New!) ===
+
+            # === TAB 3: MOVE ===
             with tab_move:
                 st.caption("Update physical location in storage.")
                 with st.form("move_stock_form"):
-                    # Structured Inputs based on your Layout (3 Racks, 4 Rows, 6 Cols)
                     mc1, mc2, mc3 = st.columns(3)
-                    
-                    # Racks 1-3
                     new_rack = mc1.selectbox("Rack", ["Rack 1", "Rack 2", "Rack 3"])
-                    
-                    # Rows 1-4
                     new_row = mc2.selectbox("Row", [f"Row {i}" for i in range(1, 5)])
-                    
-                    # Columns 1-6
                     new_col = mc3.selectbox("Column", [f"Col {i}" for i in range(1, 7)])
                     
-                    # Preview the formatted string
                     formatted_loc = f"{new_rack}, {new_row}, {new_col}"
                     st.info(f"New Location Tag: **{formatted_loc}**")
                     
                     if st.form_submit_button("Update Location", use_container_width=True):
-                        # Logic to save ONLY the location
                         idx = df_inv.index[df_inv['lot_code'] == selected_lot][0]
                         df_inv.at[idx, 'location'] = formatted_loc
                         df_inv.at[idx, 'last_updated'] = datetime.now().strftime("%Y-%m-%d")
                         save_data(df_inv, "inventory")
-                        
-                        st.success(f"moved to {formatted_loc}")
+                        st.success(f"Moved to {formatted_loc}")
                         st.rerun()
 
 
