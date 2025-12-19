@@ -865,11 +865,25 @@ if auth_status:
                             c1, c2 = st.columns(2)
                             nl = c1.text_input("Lot Code", value=batch['lot_code'])
                             nv = c2.text_input("Variety", value=batch['variety'])
-                            nq = c1.number_input("Qty (g)", value=float(batch['quantity_g']))
-                            nloc = c2.text_input("Location", value=batch['location'], help="Format: Cabinet, Row, Column")
+                            
+                            c3, c4 = st.columns(2)
+                            nq = c3.number_input("Qty (g)", value=float(batch['quantity_g']))
+                            
+                            # --- UPDATED DROPDOWN HERE ---
+                            # Logic: Try to find current type in list, default to index 0 if not found
+                            type_options = ["Virginia", "Burley", "Native"]
+                            curr_type_idx = 0
+                            if batch['type'] in type_options:
+                                curr_type_idx = type_options.index(batch['type'])
+                                
+                            nt = c4.selectbox("Tobacco Type", type_options, index=curr_type_idx)
+                            # -----------------------------
+
+                            nloc = st.text_input("Location", value=batch['location'], help="Format: Rack X, Row Y, Col Z")
                             
                             if st.form_submit_button("Update Batch"):
-                                update_batch_full(selected_lot, nl, batch['type'], nv, nq, batch['year_produced'], nloc)
+                                # We need a helper function to save these edits
+                                update_batch_full(selected_lot, nl, nt, nv, nq, batch['year_produced'], nloc)
                                 st.success("Updated Successfully!")
                                 st.rerun()
 
@@ -1065,7 +1079,7 @@ if auth_status:
             
             # Row 2: Type & Year
             c3, c4 = st.columns(2)
-            seed_type = c3.selectbox("Seed Type", ["Breeder Seed", "Foundation Seed", "Registered Seed", "Certified Seed"])
+            tobacco_type = c3.selectbox("Tobacco Type", ["Virginia", "Burley", "Native"])
             year_prod = c4.number_input("Year Produced", min_value=2000, max_value=2030, value=2023)
 
             st.divider()
@@ -1108,7 +1122,7 @@ if auth_status:
                     new_data = {
                         "lot_code": lot_code,
                         "variety": variety,
-                        "type": seed_type,
+                        "type": tobacco_type,
                         "quantity_g": qty_g,
                         "current_germination": germ_rate,
                         "year_produced": year_prod,
